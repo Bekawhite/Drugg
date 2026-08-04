@@ -4,6 +4,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 from typing import Dict, List, Tuple
 import numpy as np
+from io import BytesIO
+import base64
+from datetime import datetime
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+import io
 
 # Configure page
 st.set_page_config(
@@ -316,7 +322,7 @@ def create_ranking_df(drugs: list) -> pd.DataFrame:
     df['rank'] = df['evidence_score'].rank(method='min', ascending=False).astype(int)
     df['recommendation'] = df.apply(calculate_rank_recommendation, axis=1)
     
-    # Reorder columns for better display
+    # Reorder columns for better display - include ALL columns
     cols = ['rank', 'name', 'evidence_score', 'evidence_level', 'recommendation', 
             'pathway', 'original_use', 'key_strengths', 'key_limitations', 'rank_reasoning']
     return df[cols].sort_values('rank')
@@ -386,6 +392,186 @@ def create_scatter_plot(df: pd.DataFrame):
     fig.update_layout(height=500)
     return fig
 
+def convert_df_to_excel(df: pd.DataFrame) -> BytesIO:
+    """Convert dataframe to Excel format with formatting"""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # Write main data
+        df.to_excel(writer, sheet_name='Drug Rankings', index=False)
+        
+        # Auto-adjust column widths
+        worksheet = writer.sheets['Drug Rankings']
+        for column in worksheet.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)
+            worksheet.column_dimensions[column_letter].width = adjusted_width
+        
+        # Add summary statistics sheet
+        summary_data = {
+            'Metric': ['Total Drugs Evaluated', 'FDA-Approved', 'Clinical Trial', 
+                       'Preclinical', 'Highest Score', 'Lowest Score', 'Average Score'],
+            'Value': [
+                len(df),
+                len(df[df['evidence_level'] == 'FDA-Approved']),
+                len(df[df['evidence_level'].str.contains('Phase', na=False)]),
+                len(df[df['evidence_level'].str.contains('Preclinical', na=False)]),
+                df['evidence_score'].max(),
+                df['evidence_score'].min(),
+                df['evidence_score'].mean()
+            ]
+        }
+        summary_df = pd.DataFrame(summary_data)
+        summary_df.to_excel(writer, sheet_name='Summary Statistics', index=False)
+        
+    return output
+
+def create_pdf_report(df: pd.DataFrame, filtered: bool = False) -> BytesIO:
+    """Create a PDF report with all drug information"""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import letter, landscape
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    except ImportError:
+        st.error("ReportLab library not installed. Please install it using: pip install reportlab")
+        return None
+    
+    output = BytesIO()
+    doc = SimpleDocTemplate(output, pagesize=landscape(letter), 
+                           rightMargin=30, leftMargin=30, 
+                           topMargin=30, bottomMargin=30)
+    
+    styles = getSampleStyleSheet()
+    title_style = styles['Title']
+    heading_style = styles['Heading2']
+    
+    # Create custom style for centered text
+    center_style = ParagraphStyle(
+        'CenterStyle',
+        parent=styles['Normal'],
+        alignment=TA_CENTER,
+        fontSize=12
+    )
+    
+    elements = []
+    
+    # Title
+    title = Paragraph("Prostate Cancer Drug Repurposing Ranking", title_style)
+    elements.append(title)
+    elements.append(Spacer(1, 12))
+    
+    # Subtitle
+    subtitle = Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", center_style)
+    elements.append(subtitle)
+    elements.append(Spacer(1, 20))
+    
+    # Summary statistics
+    stats_data = [
+        ['Metric', 'Value'],
+        ['Total Drugs Evaluated', str(len(df))],
+        ['FDA-Approved', str(len(df[df['evidence_level'] == 'FDA-Approved']))],
+        ['Clinical Trial', str(len(df[df['evidence_level'].str.contains('Phase', na=False)]))],
+        ['Preclinical', str(len(df[df['evidence_level'].str.contains('Preclinical', na=False)]))],
+        ['Highest Score', f"{df['evidence_score'].max()}%"],
+        ['Lowest Score', f"{df['evidence_score'].min()}%"],
+        ['Average Score', f"{df['evidence_score'].mean():.1f}%"]
+    ]
+    
+    stats_table = Table(stats_data, colWidths=[2*inch, 2*inch])
+    stats_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 12),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+        ('GRID', (0, 0), (-1, -1), 1, colors.black)
+    ]))
+    elements.append(stats_table)
+    elements.append(Spacer(1, 20))
+    
+    # Main data table
+    # Prepare data for table - limit to top 20 for readability
+    display_df = df.head(20).copy()
+    
+    # Create table data
+    table_data = [['Rank', 'Drug Name', 'Score', 'Evidence Level', 'Recommendation', 
+                   'Pathway', 'Key Strengths', 'Key Limitations']]
+    
+    for _, row in display_df.iterrows():
+        # Truncate long text for PDF
+        strengths = row['key_strengths'][:100] + '...' if len(row['key_strengths']) > 100 else row['key_strengths']
+        limitations = row['key_limitations'][:100] + '...' if len(row['key_limitations']) > 100 else row['key_limitations']
+        pathway = row['pathway'][:80] + '...' if len(row['pathway']) > 80 else row['pathway']
+        
+        table_data.append([
+            str(row['rank']),
+            row['name'],
+            f"{row['evidence_score']}%",
+            row['evidence_level'],
+            row['recommendation'][:40],
+            pathway,
+            strengths,
+            limitations
+        ])
+    
+    # Create table with appropriate column widths
+    col_widths = [0.5*inch, 0.8*inch, 0.6*inch, 1.2*inch, 1.5*inch, 1.5*inch, 1.8*inch, 1.8*inch]
+    main_table = Table(table_data, colWidths=col_widths, repeatRows=1)
+    main_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2c3e50')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 9),
+        ('FONTSIZE', (0, 1), (-1, -1), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 4),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    elements.append(main_table)
+    elements.append(Spacer(1, 20))
+    
+    # Add footer with reasoning
+    footer_style = ParagraphStyle(
+        'FooterStyle',
+        parent=styles['Normal'],
+        fontSize=8,
+        textColor=colors.grey
+    )
+    
+    footer_text = """
+    <b>Methodology:</b> Drugs are ranked based on a composite score considering clinical trial results, 
+    FDA approvals, preclinical data, mechanistic rationale, and safety profile. 
+    Scores are normalized to 0-100% for comparative purposes.
+    
+    <b>Disclaimer:</b> This ranking is for educational and research purposes only. 
+    All drug repurposing decisions should be made by qualified medical professionals 
+    based on individual patient circumstances and current clinical guidelines.
+    """
+    footer = Paragraph(footer_text, footer_style)
+    elements.append(footer)
+    
+    # Build PDF
+    doc.build(elements)
+    output.seek(0)
+    return output
+
 def main():
     st.title("💊 Prostate Cancer Drug Repurposing Ranking")
     st.markdown("""
@@ -442,30 +628,50 @@ def main():
         top_score = df['evidence_score'].max()
         st.metric("Top Evidence Score", f"{top_score}%")
     
+    # Download buttons in sidebar
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📥 Export Data")
+    
+    if not filtered_df.empty:
+        # Excel download
+        excel_data = convert_df_to_excel(filtered_df)
+        st.sidebar.download_button(
+            label="📊 Download as Excel",
+            data=excel_data,
+            file_name=f"drug_ranking_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+        
+        # PDF download
+        pdf_data = create_pdf_report(filtered_df)
+        if pdf_data:
+            st.sidebar.download_button(
+                label="📄 Download as PDF",
+                data=pdf_data,
+                file_name=f"drug_ranking_{datetime.now().strftime('%Y%m%d')}.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+        else:
+            st.sidebar.warning("⚠️ PDF generation requires reportlab library")
+    
     # Tabs
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📊 Ranked List", 
         "📈 Visualizations", 
         "📋 Detailed Analysis",
-        "💡 Key Insights"
+        "💡 Key Insights",
+        "📥 Export Center"
     ])
     
     with tab1:
         st.subheader("🏆 Ranked Drugs by Repurposing Potential")
+        st.markdown("*All drug information is displayed to help researchers understand the ranking rationale*")
         
-        # Display ranked table with color coding
-        def color_score(val):
-            if val >= 80:
-                return 'background-color: #28a745; color: white'
-            elif val >= 60:
-                return 'background-color: #ffc107; color: black'
-            elif val >= 40:
-                return 'background-color: #fd7e14; color: white'
-            else:
-                return 'background-color: #dc3545; color: white'
-        
-        display_cols = ['rank', 'name', 'evidence_score', 'evidence_level', 
-                       'recommendation', 'key_strengths']
+        # Display ranked table with ALL columns
+        display_cols = ['rank', 'name', 'evidence_score', 'evidence_level', 'recommendation', 
+                       'pathway', 'original_use', 'key_strengths', 'key_limitations', 'rank_reasoning']
         
         styled_df = filtered_df[display_cols].copy()
         styled_df['evidence_score'] = styled_df['evidence_score'].apply(lambda x: f"{x}%")
@@ -480,7 +686,11 @@ def main():
                 "evidence_score": "Score",
                 "evidence_level": "Evidence Level",
                 "recommendation": "Recommendation",
-                "key_strengths": "Key Strengths"
+                "pathway": "Pathway Targeted",
+                "original_use": "Original Use",
+                "key_strengths": "Key Strengths",
+                "key_limitations": "Key Limitations",
+                "rank_reasoning": "Rank Reasoning"
             }
         )
     
@@ -502,7 +712,8 @@ def main():
                 y='evidence_score',
                 color='recommendation',
                 title="Top 15 Drugs by Evidence Score",
-                labels={'evidence_score': 'Evidence Score (%)', 'name': ''}
+                labels={'evidence_score': 'Evidence Score (%)', 'name': ''},
+                color_discrete_sequence=px.colors.qualitative.Set3
             )
             fig_bar.update_layout(height=500)
             st.plotly_chart(fig_bar, use_container_width=True)
@@ -584,6 +795,92 @@ def main():
         | Mixed/Limited | 5+ | Temsirolimus, Lapatinib, Cetuximab |
         | Negative/No Evidence | 10+ | Erlotinib, Gefitinib, Idelalisib |
         """)
+    
+    with tab5:
+        st.subheader("📥 Export Center")
+        
+        st.markdown("""
+        ### Download Complete Reports
+        
+        Export the complete ranked dataset with all drug information for offline analysis.
+        """)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("#### 📊 Excel Export")
+            st.markdown("""
+            Export to Excel with all data including:
+            - Complete drug rankings with all fields
+            - Summary statistics
+            - Auto-formatted columns
+            """)
+            
+            excel_data_full = convert_df_to_excel(df)
+            st.download_button(
+                label="📥 Download Complete Dataset (All Drugs)",
+                data=excel_data_full,
+                file_name=f"complete_ranking_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+            
+            if not filtered_df.empty:
+                excel_data_filtered = convert_df_to_excel(filtered_df)
+                st.download_button(
+                    label=f"📥 Download Filtered Dataset ({len(filtered_df)} drugs)",
+                    data=excel_data_filtered,
+                    file_name=f"filtered_ranking_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+        
+        with col2:
+            st.markdown("#### 📄 PDF Report")
+            st.markdown("""
+            Professional PDF report including:
+            - Executive summary with statistics
+            - Top 20 drugs with all key information
+            - Methodology and disclaimer
+            """)
+            
+            pdf_data = create_pdf_report(df)
+            if pdf_data:
+                st.download_button(
+                    label="📄 Download Complete Report (All Drugs)",
+                    data=pdf_data,
+                    file_name=f"complete_report_{datetime.now().strftime('%Y%m%d')}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+                
+                if not filtered_df.empty:
+                    pdf_data_filtered = create_pdf_report(filtered_df)
+                    if pdf_data_filtered:
+                        st.download_button(
+                            label=f"📄 Download Filtered Report ({len(filtered_df)} drugs)",
+                            data=pdf_data_filtered,
+                            file_name=f"filtered_report_{datetime.now().strftime('%Y%m%d')}.pdf",
+                            mime="application/pdf",
+                            use_container_width=True
+                        )
+            else:
+                st.warning("⚠️ PDF generation requires reportlab. Install with: `pip install reportlab`")
+        
+        # Data preview
+        st.markdown("---")
+        st.markdown("### 📊 Data Preview")
+        preview_cols = ['rank', 'name', 'evidence_score', 'evidence_level', 'recommendation', 'pathway']
+        st.dataframe(
+            df[preview_cols].head(10),
+            use_container_width=True,
+            column_config={
+                "evidence_score": st.column_config.NumberColumn(
+                    "Score",
+                    format="%.0f%%"
+                )
+            }
+        )
     
     # Footer
     st.markdown("""
