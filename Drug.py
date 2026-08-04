@@ -7,8 +7,6 @@ import numpy as np
 from io import BytesIO
 import base64
 from datetime import datetime
-import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
 import io
 
 # Configure page
@@ -432,17 +430,16 @@ def convert_df_to_excel(df: pd.DataFrame) -> BytesIO:
         
     return output
 
-def create_pdf_report(df: pd.DataFrame, filtered: bool = False) -> BytesIO:
+def create_pdf_report(df: pd.DataFrame) -> BytesIO:
     """Create a PDF report with all drug information"""
     try:
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import letter, landscape
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib.units import inch
-        from reportlab.lib.enums import TA_CENTER, TA_LEFT
+        from reportlab.lib.enums import TA_CENTER
     except ImportError:
-        st.error("ReportLab library not installed. Please install it using: pip install reportlab")
         return None
     
     output = BytesIO()
@@ -452,7 +449,6 @@ def create_pdf_report(df: pd.DataFrame, filtered: bool = False) -> BytesIO:
     
     styles = getSampleStyleSheet()
     title_style = styles['Title']
-    heading_style = styles['Heading2']
     
     # Create custom style for centered text
     center_style = ParagraphStyle(
@@ -500,8 +496,7 @@ def create_pdf_report(df: pd.DataFrame, filtered: bool = False) -> BytesIO:
     elements.append(stats_table)
     elements.append(Spacer(1, 20))
     
-    # Main data table
-    # Prepare data for table - limit to top 20 for readability
+    # Main data table - limit to top 20 for readability
     display_df = df.head(20).copy()
     
     # Create table data
@@ -654,7 +649,7 @@ def main():
                 use_container_width=True
             )
         else:
-            st.sidebar.warning("⚠️ PDF generation requires reportlab library")
+            st.sidebar.info("ℹ️ Install reportlab for PDF export: `pip install reportlab`")
     
     # Tabs
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
